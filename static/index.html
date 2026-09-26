@@ -6,28 +6,149 @@
   <title>住房贷款纾困申请与履约跟踪</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
+    main { max-width: 1080px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input { padding: .45rem .6rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
+    th, td { border: 1px solid #d8dee5; padding: .4rem .6rem; text-align: left; font-size: .92rem; }
+    th { background: #eef2f6; }
+    .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .6rem 0; }
+    .tag { display: inline-block; padding: .1rem .5rem; border-radius: 10px; font-size: .85rem; background: #e8eef4; }
+    .tag.paid { background: #d9f2e3; }
+    .tag.partial { background: #fdf0d5; }
+    .tag.pending { background: #e8eef4; }
+    .tag.cured { background: #d9f2e3; }
+    .tag.defaulted { background: #fadadd; }
+    .event { border-left: 3px solid #b6c4d2; padding: .3rem .8rem; margin: .35rem 0; }
+    .event.cured { border-color: #2e9e5b; }
+    .event.defaulted { border-color: #c94f4f; }
+    h2 { margin-top: 1.6rem; }
   </style>
 </head>
 <body>
 <main>
   <h1>住房贷款纾困申请与履约跟踪</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <div class="row">
+    <button id="load">加载记录</button>
+    <button id="stats">查看状态统计</button>
+    <input id="recordId" type="number" min="1" placeholder="记录ID" style="width:7rem">
+    <button id="detail">查看履约详情</button>
+  </div>
+  <div id="panel" style="display:none">
+    <h2>分期履约计划 <span id="stateTag" class="tag"></span></h2>
+    <div id="schedule"></div>
+    <h2>登记还款</h2>
+    <div class="row">
+      <input id="payAmount" type="number" min="0" step="0.01" placeholder="金额">
+      <input id="payDate" type="date">
+      <button id="pay">登记还款</button>
+      <span>剩余期数结清自动恢复；宽限期末欠款由评估判定。</span>
+    </div>
+    <h2>履约评估</h2>
+    <div class="row">
+      <input id="asOf" type="date">
+      <button id="evaluate">按该日期评估</button>
+      <span>连续两个宽限期末未补足将转违约。</span>
+    </div>
+    <h2>状态变化时间线</h2>
+    <div id="timeline"></div>
+  </div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
+const postHeaders = Object.assign({"Content-Type":"application/json"}, headers);
+const output = document.getElementById("output");
+const STATUS_TEXT = {pending:"待还", partial:"部分还款", paid:"已结清"};
+const STATE_TEXT = {submitted:"已提交", assessed:"已评估", approved:"已批准", active:"履约中", cured:"已恢复", defaulted:"已违约"};
+let current = null;
+
+function show(data) { output.textContent = JSON.stringify(data, null, 2); }
+async function get(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+  show(data);
+  return data;
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+async function act(action, data) {
+  const response = await fetch(`/api/records/${current.id}/actions/${action}`, {
+    method: "POST", headers: postHeaders,
+    body: JSON.stringify({expected_version: current.version, data}),
+  });
+  const result = await response.json();
+  if (!response.ok) { show(result); alert(result.message || "操作失败"); return null; }
+  return result;
+}
+
+function renderSchedule(record) {
+  const payload = record.payload;
+  const schedule = payload.schedule || [];
+  const payments = payload.payments || [];
+  const clearedBy = {};
+  for (const payment of payments) {
+    for (const alloc of payment.allocations || []) {
+      if ((schedule[alloc.period - 1] || {}).status === "paid") clearedBy[alloc.period] = payment.id;
+    }
+  }
+  const rows = schedule.map(item => {
+    const owed = (item.due_amount - item.paid_amount).toFixed(2);
+    const cleared = clearedBy[item.period] ? `还款#${clearedBy[item.period]}` : "—";
+    return `<tr><td>第${item.period}期</td><td>${item.due_amount.toFixed(2)}</td><td>${item.paid_amount.toFixed(2)}</td>` +
+      `<td>${owed}</td><td>${item.due_date}</td><td>${item.grace_deadline}</td>` +
+      `<td><span class="tag ${item.status}">${STATUS_TEXT[item.status] || item.status}</span></td><td>${cleared}</td></tr>`;
+  }).join("");
+  document.getElementById("schedule").innerHTML = schedule.length
+    ? `<table><tr><th>期次</th><th>应还</th><th>实还</th><th>剩余</th><th>应还日</th><th>宽限截止</th><th>状态</th><th>结清来源</th></tr>${rows}</table>` +
+      `<p>宽限天数：${payload.grace_days ?? "—"} 天；累计还款 ${payments.length} 笔。</p>`
+    : "<p>方案尚未生效，暂无分期计划。</p>";
+  const tag = document.getElementById("stateTag");
+  tag.textContent = STATE_TEXT[record.state] || record.state;
+  tag.className = "tag " + record.state;
+}
+
+function renderTimeline(items) {
+  const html = items.map(ev => {
+    const d = ev.details || {};
+    let line = d.summary || ev.action;
+    if (ev.action === "pay" && d.input) line += `（金额 ${d.input.amount}，冲抵期次：${(d.input.allocations || "按顺序自动冲抵")}）`;
+    if (ev.action === "pay" && d.to === "cured") line += " —— 该笔还款触发恢复";
+    if (ev.action === "evaluate" && d.to === "defaulted") line += " —— 本次评估触发违约";
+    return `<div class="event ${d.to || ""}"><strong>#${ev.id} ${ev.action}</strong> ${line}<br><small>${ev.created_at} · 操作人 ${ev.actor_id} · 版本 ${ev.version}</small></div>`;
+  }).join("");
+  document.getElementById("timeline").innerHTML = html || "<p>暂无事件。</p>";
+}
+
+async function loadDetail() {
+  const id = document.getElementById("recordId").value;
+  if (!id) { alert("请输入记录ID"); return; }
+  current = await get(`/api/records/${id}`);
+  if (current.error) { current = null; return; }
+  document.getElementById("panel").style.display = "block";
+  renderSchedule(current);
+  const audit = await fetch(`/api/records/${id}/audit`, {headers}).then(r => r.json());
+  renderTimeline(audit.items || []);
+}
+
+document.getElementById("load").onclick = () => get("/api/records?limit=20");
+document.getElementById("stats").onclick = () => get("/api/stats");
+document.getElementById("detail").onclick = loadDetail;
+document.getElementById("pay").onclick = async () => {
+  const amount = parseFloat(document.getElementById("payAmount").value);
+  if (!(amount > 0)) { alert("请输入还款金额"); return; }
+  const data = {amount};
+  const paidAt = document.getElementById("payDate").value;
+  if (paidAt) data.paid_at = paidAt;
+  const result = await act("pay", data);
+  if (result) { show(result); await loadDetail(); }
+};
+document.getElementById("evaluate").onclick = async () => {
+  const data = {};
+  const asOf = document.getElementById("asOf").value;
+  if (asOf) data.as_of = asOf;
+  const result = await act("evaluate", data);
+  if (result) { show(result); await loadDetail(); }
+};
 </script>
 </body>
 </html>
